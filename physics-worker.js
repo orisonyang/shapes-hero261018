@@ -8,6 +8,7 @@
   let world = null, walls = [], bodies = [], gen = 0;
   let input = { gx: 0, gz: 0, tiltAmt: 0, homeAmt: 1, pointerActive: false, px: 0, pz: 0, tapBoost: 1, on: true, at: -1e9 };
   let acc = 0, last = 0, steps = 0, ms = 0;
+  const INTRO_STEPS = 180; let intro = 0; // 쏟아지는 인트로 남은 걸음
   const lerp = (a, b, t) => a + (b - a) * t;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -76,8 +77,10 @@
       }
       return { b, d, mass: b.mass(), hx: 0, hz: 0, returning: false, stuck: 0 };
     });
-    for (let i = 0; i < 480; i++) world.step(); // 첫 화면 전에 8초 분량 미리 떨어뜨려 안착
-    for (const o of bodies) { const p = o.b.translation(); o.hx = p.x; o.hz = p.z; } // 안착한 자리 = 수평일 때 돌아올 자리
+    // 미리 안착시키지 않고 바로 보여 줌: 위에 놓인 도형이 실제로 떨어져 쌓이는 모습이 첫 화면 연출
+    // 처음 3초(인트로)는 돌아올 자리가 도형을 따라다니고, 끝나는 순간 자리 잡은 곳이 '제자리'가 됨
+    intro = INTRO_STEPS;
+    for (const o of bodies) { const p = o.b.translation(); o.hx = p.x; o.hz = p.z; }
     send();
   }
   // 상자 크기가 조금 바뀜: 벽만 옮기고 밖에 나간 도형을 안으로
@@ -96,8 +99,10 @@
   function forces(dt) {
     const { gx, gz, tiltAmt, homeAmt, pointerActive, px, pz, tapBoost } = input;
     const level = homeAmt > 0.01;
+    if (intro > 0) intro--;
     for (const o of bodies) {
       const b = o.b, d = o.d, p = b.translation(), m = o.mass;
+      if (intro > 0) { o.hx = p.x; o.hz = p.z; o.returning = false; } // 인트로 중: 제자리 = 지금 자리
       const hx = o.hx - p.x, hz = o.hz - p.z, dist = Math.hypot(hx, hz);
       // 실제로 밀려난 도형만 당김: 0.25 넘게 벗어나면 시작해 0.08 안으로 들어올 때까지 (경계에서 들락날락하며 떨지 않게)
       if (dist > 0.25) o.returning = true; else if (dist < 0.08) o.returning = false;
