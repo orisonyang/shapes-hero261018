@@ -1230,11 +1230,8 @@ const deg = THREE.MathUtils.degToRad;
 // 기기 기준 중력 방향 (x: 기기 오른쪽, y: 기기 위쪽, z: 화면 밖) — 각도를 직접 빼지 않고 실제 중력 벡터로 계산
 //  → 기기를 세워 들거나(아이패드를 비스듬히 세운 자세) 가로로 돌려도 축이 뒤집히거나 튀지 않음
 const gravNow = new THREE.Vector3(), gravBase = new THREE.Vector3(), levelQ = new THREE.Quaternion();
-let baselineSet = false;  // 처음 들고 있던 자세를 수평으로 간주
-// 기준 천천히 보정: 거의 수평으로 들고 있을 때(기울기 약 9° 미만)만, 3초에 걸쳐 지금 자세 쪽으로 기준을 맞춤
-//  → 보다가 자세가 조금 바뀌어도 저절로 정리되고, 일부러 크게 기울이면 계속 흐름
-const LEVEL_SMALL = 0.15, LEVEL_TAU = 3;
-let lastSensorAt = 0;
+// 수평 기준: 기본은 진짜 바닥(기기를 책상에 눕혀 놓은 자세) → 실제 중력 그대로 흐름
+// 화면을 두 번 탭하면 그때 들고 있던 자세가 새 수평이 됨 (levelQ: 기준 자세 → 바닥으로 돌리는 회전)
 const DOWN = new THREE.Vector3(0, 0, -1);
 function screenAngle() { // 화면 회전 각도 (기기를 반시계로 90° 돌리면 90)
   if (typeof window.orientation === 'number') return window.orientation;
@@ -1245,26 +1242,20 @@ function onOrientation(e) {
   sensorActive = true;
   const b = deg(e.beta), g = deg(e.gamma);
   gravNow.set(Math.cos(b) * Math.sin(g), -Math.sin(b), -Math.cos(b) * Math.cos(g)); // 기기 기준 중력 (단위 벡터)
-  if (!baselineSet) { gravBase.copy(gravNow); levelQ.setFromUnitVectors(gravBase, DOWN); baselineSet = true; }
-  const v = gravNow.clone().applyQuaternion(levelQ);  // 처음 자세를 수평으로 돌려 놓은 중력
+  const v = gravNow.clone().applyQuaternion(levelQ);  // 기준 자세를 수평으로 돌려 놓은 중력 (기본: 그대로)
   const dx = v.x, dy = -v.y;                          // 기기 화면 기준: 오른쪽 · 아래쪽으로 기운 정도
   const a = deg(screenAngle());                       // 가로 모드: 화면 축에 맞게 회전
   tilt.set(dx * Math.cos(a) + dy * Math.sin(a), -dx * Math.sin(a) + dy * Math.cos(a));
-  const now = performance.now(), dts = Math.min(0.2, (now - lastSensorAt) / 1000); lastSensorAt = now;
-  if (tilt.length() < LEVEL_SMALL) {
-    gravBase.lerp(gravNow, 1 - Math.exp(-dts / LEVEL_TAU)).normalize();
-    levelQ.setFromUnitVectors(gravBase, DOWN);
-  }
   if (tiltDebug) showTiltDebug(e);
 }
-// 화면을 돌리면 그 자세를 새 수평으로
-const resetLevel = () => { baselineSet = false; };
+// 두 번 탭: 지금 자세를 새 수평으로 (화면을 돌려도 기준 자세는 기기 기준이라 그대로 유지)
+const resetLevel = () => { if (sensorActive) { gravBase.copy(gravNow); levelQ.setFromUnitVectors(gravBase, DOWN); } };
 // 화면이 도는 동안(약 0.7초)은 그리기·물리를 잠시 멈춤 → 회전 애니메이션이 버벅이지 않게
 let rotatingUntil = 0;
-window.addEventListener('orientationchange', () => { resetLevel(); rotatingUntil = performance.now() + 700; });
-if (screen.orientation) screen.orientation.addEventListener?.('change', resetLevel);
+window.addEventListener('orientationchange', () => { rotatingUntil = performance.now() + 700; });
+if (screen.orientation) screen.orientation.addEventListener?.('change', () => { rotatingUntil = performance.now() + 700; });
 
-// 두 번 탭: 지금 자세를 새 수평으로 (기울기 센서를 쓰는 기기만)
+// 두 번 탭 감지 (기울기 센서를 쓰는 기기만)
 let lastTap = { t: 0, x: 0, y: 0 };
 const levelToast = document.createElement('div');
 levelToast.className = 'level-toast';
