@@ -95,6 +95,25 @@
     }
     send();
   }
+  // 화면이 돌아가거나 비율이 크게 바뀜: 도형을 새로 만들지 않고, 기기와 함께 돈 만큼 배치를 돌리고 새 크기에 맞춤
+  //  rot: 화면이 돈 각도(라디안) → 도형은 실제 기기 위에서 그대로 있는 것처럼 보임
+  function reflow(hx, hz, rot, sx, sz) {
+    if (!world) return;
+    buildWalls(hx, hz);
+    const c = Math.cos(rot), s = Math.sin(rot), qa = Math.sin(rot / 2), qb = Math.cos(rot / 2);
+    for (const o of bodies) {
+      const b = o.b, p = b.translation(), q = b.rotation(), v = b.linvel(), r = 0.5 * o.d.s;
+      const x = clamp((p.x * c + p.z * s) * sx, -hx + r, hx - r), z = clamp((-p.x * s + p.z * c) * sz, -hz + r, hz - r);
+      b.setTranslation({ x, y: p.y, z }, true);
+      b.setRotation({ x: qb * q.x + qa * q.z, y: qb * q.y + qa * q.w, z: qb * q.z - qa * q.x, w: qb * q.w - qa * q.y }, true); // y축 회전 × 기존 회전
+      b.setLinvel({ x: v.x * c + v.z * s, y: v.y, z: -v.x * s + v.z * c }, true);
+      const h = o.hx;
+      o.hx = clamp((h * c + o.hz * s) * sx, -hx + r, hx - r);
+      o.hz = clamp((-h * s + o.hz * c) * sz, -hz + r, hz - r);
+      o.returning = false; o.stuck = 0;
+    }
+    send();
+  }
   // 한 걸음 분량의 힘: 기울기 흐름 · 제자리 복귀 · 손가락/마우스 밀기
   function forces(dt) {
     const { gx, gz, tiltAmt, homeAmt, pointerActive, px, pz, tapBoost } = input;
@@ -168,6 +187,7 @@
       if (m.type === 'config') { cfg = m.cfg; hulls = m.hulls; }
       else if (m.type === 'populate') { gen = m.gen; populate(m.list, m.hx, m.hz); }
       else if (m.type === 'bounds') setBounds(m.hx, m.hz);
+      else if (m.type === 'reflow') { gen = m.gen; reflow(m.hx, m.hz, m.rot, m.sx, m.sz); }
       else if (m.type === 'input') { input = m.input; input.at = performance.now(); }
     },
   };

@@ -30,6 +30,14 @@
     .hero.dragging { cursor: grabbing; }
   }
   .hero canvas { display: block; width: 100%; height: 100%; }
+  .hero { touch-action: manipulation; } /* 두 번 탭해도 화면이 확대되지 않게 (두 번 탭 = 수평 다시 맞추기) */
+  .level-toast {
+    position: absolute; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+    padding: 7px 12px; border-radius: 999px; background: rgba(19, 19, 19, 0.72); color: #f3ebdc;
+    font-size: 13px; white-space: nowrap; pointer-events: none; opacity: 0;
+  }
+  .level-toast.show { animation: levelToast 1.6s ease forwards; }
+  @keyframes levelToast { 0% { opacity: 0; } 12% { opacity: 1; } 70% { opacity: 1; } 100% { opacity: 0; } }
 </style>
 </head>
 <body>
@@ -445,7 +453,7 @@ function visibleHalfExtent() {
 // 물리는 별도 스레드(Web Worker)에서 초당 60번 계산 → 화면 그리기가 물리를 기다리지 않고, 물리도 화면이 느려도 제 속도를 지킴.
 // 별도 스레드를 쓸 수 없는 브라우저에서는 같은 코드를 메인에서 돌림 (동작은 같음)
 const SPEED = 1.1 * 1.15; // 전체 반응 배율 (흐름·복귀·밀어내기) — 무게 기준은 그대로, 반응만 15% 더
-const TILT_SNAP = 1.5; // 기울기 방향 전환 반응: 힘과 저항을 함께 키움 → 최고 속도는 같고, 방향이 바뀌면 더 빨리 따라감
+const TILT_SNAP = 1.6; // 기울기 방향 전환 반응: 힘과 저항을 함께 키움 → 최고 속도는 같고, 방향이 바뀌면 더 빨리 따라감
 const GRAVITY = 14; // 약한 중력 → 가볍게 굴러가고, 밀리면 서로 위로 올라탐
 
 // 물리 본체: 바깥 변수를 쓰지 않는 독립 함수 (문자열로 바꿔 별도 스레드에서도 그대로 실행)
@@ -542,6 +550,25 @@ function physicsCore(RAPIER, post) {
     }
     send();
   }
+  // 화면이 돌아가거나 비율이 크게 바뀜: 도형을 새로 만들지 않고, 기기와 함께 돈 만큼 배치를 돌리고 새 크기에 맞춤
+  //  rot: 화면이 돈 각도(라디안) → 도형은 실제 기기 위에서 그대로 있는 것처럼 보임
+  function reflow(hx, hz, rot, sx, sz) {
+    if (!world) return;
+    buildWalls(hx, hz);
+    const c = Math.cos(rot), s = Math.sin(rot), qa = Math.sin(rot / 2), qb = Math.cos(rot / 2);
+    for (const o of bodies) {
+      const b = o.b, p = b.translation(), q = b.rotation(), v = b.linvel(), r = 0.5 * o.d.s;
+      const x = clamp((p.x * c + p.z * s) * sx, -hx + r, hx - r), z = clamp((-p.x * s + p.z * c) * sz, -hz + r, hz - r);
+      b.setTranslation({ x, y: p.y, z }, true);
+      b.setRotation({ x: qb * q.x + qa * q.z, y: qb * q.y + qa * q.w, z: qb * q.z - qa * q.x, w: qb * q.w - qa * q.y }, true); // y축 회전 × 기존 회전
+      b.setLinvel({ x: v.x * c + v.z * s, y: v.y, z: -v.x * s + v.z * c }, true);
+      const h = o.hx;
+      o.hx = clamp((h * c + o.hz * s) * sx, -hx + r, hx - r);
+      o.hz = clamp((-h * s + o.hz * c) * sz, -hz + r, hz - r);
+      o.returning = false; o.stuck = 0;
+    }
+    send();
+  }
   // 한 걸음 분량의 힘: 기울기 흐름 · 제자리 복귀 · 손가락/마우스 밀기
   function forces(dt) {
     const { gx, gz, tiltAmt, homeAmt, pointerActive, px, pz, tapBoost } = input;
@@ -615,6 +642,7 @@ function physicsCore(RAPIER, post) {
       if (m.type === 'config') { cfg = m.cfg; hulls = m.hulls; }
       else if (m.type === 'populate') { gen = m.gen; populate(m.list, m.hx, m.hz); }
       else if (m.type === 'bounds') setBounds(m.hx, m.hz);
+      else if (m.type === 'reflow') { gen = m.gen; reflow(m.hx, m.hz, m.rot, m.sx, m.sz); }
       else if (m.type === 'input') { input = m.input; input.at = performance.now(); }
     },
   };
@@ -848,6 +876,7 @@ async function populate() {
   }
   // 셰이더(재질) 준비와 물리 엔진 준비를 동시에 → 첫 화면이 바로 그려짐
   await Promise.all([physicsReady, renderer.compileAsync ? renderer.compileAsync(scene, camera) : null]);
+  layoutAngle = screenAngle(); layoutHalf = { x: hx, z: hz };
   await settle(hx, hz);
 }
 
@@ -959,6 +988,28 @@ function syncShape(sh, force, A, B, alpha, k) {
 
 // ---------- Resize: 상자 비율이 바뀌면 구도·벽·개수를 다시 맞춤 ----------
 let builtAspect = 0, rebuildTimer = 0;
+let layoutAngle = 0, layoutHalf = { x: 1, z: 1 }; // 지금 배치를 만든 화면 각도·크기
+// 배치를 새 화면에 맞춤 (다시 채우지 않음): 화면이 돈 각도만큼 돌리고 크기 비율만큼 늘이거나 줄임
+function reflowLayout() {
+  const { x: hx, z: hz } = visibleHalfExtent();
+  const turn = ((screenAngle() - layoutAngle) % 360 + 360) % 360;
+  const rot = THREE.MathUtils.degToRad(turn);
+  const c = Math.abs(Math.cos(rot)), s = Math.abs(Math.sin(rot));
+  const sx = hx / (c * layoutHalf.x + s * layoutHalf.z), sz = hz / (s * layoutHalf.x + c * layoutHalf.z);
+  bounds.x = hx; bounds.z = hz;
+  layoutAngle = screenAngle(); layoutHalf = { x: hx, z: hz };
+  const gen = ++physics.gen;
+  physics.onState = m => {
+    if (m.gen !== gen) return;
+    history.length = 0; // 돌리기 전 상태와 섞어 보간하지 않게
+    applyState(m);
+    physics.onState = applyState;
+    shapes.forEach((sh, i) => syncShape(sh, true, m.buf, m.buf, 1, i * 12));
+    for (const inst of group.children) inst.instanceMatrix.needsUpdate = true;
+    builtAspect = camera.aspect; lastCapture = -1; idleFrames = 0;
+  };
+  physics.send({ type: 'reflow', gen, hx, hz, rot, sx, sz });
+}
 function resize() {
   idleFrames = 0;
   const w = Math.max(1, hero.clientWidth), h = Math.max(1, hero.clientHeight);
@@ -972,10 +1023,8 @@ function resize() {
   const changed = Math.abs(Math.log(a1 / a0)) > 0.2;
   clearTimeout(rebuildTimer);
   if (flipped || changed) {
-    // 가로↔세로 회전이나 큰 비율 변화: 잠시 뒤 새 비율로 다시 채움
-    rebuildTimer = setTimeout(() => {
-      populate().then(() => { buildFur(); builtAspect = camera.aspect; lastCapture = -1; idleFrames = 0; });
-    }, 250);
+    // 가로↔세로 회전이나 큰 비율 변화: 잠시 뒤 지금 도형들을 새 화면에 맞게 옮김 (새로 만들지 않아 가볍고 자연스러움)
+    rebuildTimer = setTimeout(reflowLayout, 250);
   } else {
     // 작은 변화: 벽만 옮기고 밖에 나간 도형을 안으로
     const { x: hx, z: hz } = visibleHalfExtent();
@@ -1182,6 +1231,10 @@ const deg = THREE.MathUtils.degToRad;
 //  → 기기를 세워 들거나(아이패드를 비스듬히 세운 자세) 가로로 돌려도 축이 뒤집히거나 튀지 않음
 const gravNow = new THREE.Vector3(), gravBase = new THREE.Vector3(), levelQ = new THREE.Quaternion();
 let baselineSet = false;  // 처음 들고 있던 자세를 수평으로 간주
+// 기준 천천히 보정: 거의 수평으로 들고 있을 때(기울기 약 9° 미만)만, 3초에 걸쳐 지금 자세 쪽으로 기준을 맞춤
+//  → 보다가 자세가 조금 바뀌어도 저절로 정리되고, 일부러 크게 기울이면 계속 흐름
+const LEVEL_SMALL = 0.15, LEVEL_TAU = 3;
+let lastSensorAt = 0;
 const DOWN = new THREE.Vector3(0, 0, -1);
 function screenAngle() { // 화면 회전 각도 (기기를 반시계로 90° 돌리면 90)
   if (typeof window.orientation === 'number') return window.orientation;
@@ -1197,12 +1250,35 @@ function onOrientation(e) {
   const dx = v.x, dy = -v.y;                          // 기기 화면 기준: 오른쪽 · 아래쪽으로 기운 정도
   const a = deg(screenAngle());                       // 가로 모드: 화면 축에 맞게 회전
   tilt.set(dx * Math.cos(a) + dy * Math.sin(a), -dx * Math.sin(a) + dy * Math.cos(a));
+  const now = performance.now(), dts = Math.min(0.2, (now - lastSensorAt) / 1000); lastSensorAt = now;
+  if (tilt.length() < LEVEL_SMALL) {
+    gravBase.lerp(gravNow, 1 - Math.exp(-dts / LEVEL_TAU)).normalize();
+    levelQ.setFromUnitVectors(gravBase, DOWN);
+  }
   if (tiltDebug) showTiltDebug(e);
 }
 // 화면을 돌리면 그 자세를 새 수평으로
 const resetLevel = () => { baselineSet = false; };
-window.addEventListener('orientationchange', resetLevel);
+// 화면이 도는 동안(약 0.7초)은 그리기·물리를 잠시 멈춤 → 회전 애니메이션이 버벅이지 않게
+let rotatingUntil = 0;
+window.addEventListener('orientationchange', () => { resetLevel(); rotatingUntil = performance.now() + 700; });
 if (screen.orientation) screen.orientation.addEventListener?.('change', resetLevel);
+
+// 두 번 탭: 지금 자세를 새 수평으로 (기울기 센서를 쓰는 기기만)
+let lastTap = { t: 0, x: 0, y: 0 };
+const levelToast = document.createElement('div');
+levelToast.className = 'level-toast';
+levelToast.textContent = '지금 자세를 수평으로 맞췄어요';
+hero.appendChild(levelToast);
+hero.addEventListener('pointerup', e => {
+  if (e.pointerType !== 'touch' || !sensorActive) return;
+  const now = performance.now();
+  if (now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40) {
+    resetLevel();
+    levelToast.classList.remove('show'); void levelToast.offsetWidth; levelToast.classList.add('show');
+    lastTap.t = 0;
+  } else lastTap = { t: now, x: e.clientX, y: e.clientY };
+});
 
 // 기울기 확인용 표시: 주소 끝에 #tilt 를 붙이면 센서 값과 기울기 방향 화살표를 보여 줌
 const tiltDebug = location.hash === '#tilt' ? document.createElement('div') : null;
@@ -1378,6 +1454,7 @@ function tick() {
   const dt = Math.min(clock.getDelta(), 1 / 30);
   const t = clock.elapsedTime;
   if (!heroVisible) return; // 스크롤해서 화면 밖에 있으면 물리·그리기 모두 쉼
+  if (performance.now() < rotatingUntil) { idleFrames = 0; return; } // 화면 회전 중: 잠시 멈춤
 
   // 기울기 결정: 방향키 > 마우스 드래그 > 기기 센서 순
   const kx = (keys.has('ArrowRight') ? 1 : 0) - (keys.has('ArrowLeft') ? 1 : 0);
